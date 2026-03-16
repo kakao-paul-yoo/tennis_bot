@@ -142,17 +142,20 @@ def send_telegram(message: str):
         print("  [텔레그램] 토큰 또는 채팅 ID 미설정")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    try:
-        res = requests.post(url, json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-        }, timeout=10)
-        if res.status_code == 200:
-            print("  ✅ 텔레그램 알림 발송 성공")
-        else:
-            print(f"  ❌ 텔레그램 실패: {res.text}")
-    except Exception as e:
-        print(f"  [텔레그램 오류] {e}")
+    # 4000자 단위로 분할 전송
+    chunks = [message[i:i+4000] for i in range(0, len(message), 4000)]
+    for chunk in chunks:
+        try:
+            res = requests.post(url, json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": chunk,
+            }, timeout=10)
+            if res.status_code == 200:
+                print("  ✅ 텔레그램 알림 발송 성공")
+            else:
+                print(f"  ❌ 텔레그램 실패: {res.text}")
+        except Exception as e:
+            print(f"  [텔레그램 오류] {e}")
 
 
 # ==========================================
@@ -169,16 +172,14 @@ def check_and_notify():
 
     print(f"\n[{now.strftime('%Y-%m-%d %H:%M:%S')}] 전체 코트 체크 중...")
 
-    all_new_slots = []  # (코트명, item_id, slot)
+    all_new_slots = []
     error_count = 0
 
     for court_name, item_id in COURTS.items():
         slots = get_hourly_schedule(item_id, start_dt, end_dt)
-
         if not slots:
             error_count += 1
             continue
-
         for slot in slots:
             if not is_available(slot):
                 continue
@@ -188,7 +189,6 @@ def check_and_notify():
             notified_slots.add(slot_key)
             all_new_slots.append((court_name, item_id, slot))
 
-    # 전체 코트 오류 = 쿠키 만료
     if error_count == len(COURTS):
         print("  → 전체 코트 오류 (쿠키 만료 가능성)")
         send_telegram(
@@ -198,23 +198,39 @@ def check_and_notify():
         )
         return
 
+    # ↓ 여기서부터 교체
     if all_new_slots:
-        lines = [f"🎾 내곡 테니스장 예약 가능! ({len(all_new_slots)}개 슬롯)\n"]
+        near_slots = []
+        far_slots = []
+        cutoff = datetime.now() + timedelta(days=3)
+
         for court_name, item_id, s in all_new_slots:
-            unit_start_time = s.get("unitStartTime", "")
-            duration = s.get("duration", 0)
             try:
+                dt = datetime.strptime(s.get("unitStartTime", ""), "%Y-%m-%d %H:%M:%S")
+                if dt <= cutoff:
+                    near_slots.append((court_name, item_id, s))
+                else:
+                    far_slots.append((court_name, item_id, s))
+            except Exception:
+                near_slots.append((court_name, item_id, s))
+
+        lines = [f"🎾 내곡 테니스장 예약 가능! (총 {len(all_new_slots)}개)\n"]
+
+        if near_slots:
+            lines.append("📌 3일 이내:")
+            for court_name, item_id, s in near_slots:
+                unit_start_time = s.get("unitStartTime", "")
+                duration = s.get("duration", 0)
                 dt = datetime.strptime(unit_start_time, "%Y-%m-%d %H:%M:%S")
                 weekdays = ["월", "화", "수", "목", "금", "토", "일"]
                 wd = weekdays[dt.weekday()]
                 time_str = dt.strftime(f"%m/%d({wd}) %H:%M")
-            except Exception:
-                time_str = unit_start_time
-            lines.append(f"  📅 {time_str} ({duration}분) | {court_name}")
+                lines.append(f"  📅 {time_str} ({duration}분) | {court_name}")
 
-        lines.append(
-            f"\n👉 https://booking.naver.com/booking/10/bizes/{BIZ_ID}/items/"
-        )
+        if far_slots:
+            lines.append(f"\n📋 이후 슬롯: {len(far_slots)}개 더 있음")
+
+        lines.append(f"\n👉 https://booking.naver.com/booking/10/bizes/{BIZ_ID}/items/")
         message = "\n".join(lines)
         print(message)
         send_telegram(message)
