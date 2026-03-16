@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 
 BIZ_ID = "217811"
 MONITOR_DAYS_AHEAD = int(os.environ.get("MONITOR_DAYS_AHEAD", "22"))
-CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL_MINUTES", "5"))
+CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL_MINUTES", "10"))
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
