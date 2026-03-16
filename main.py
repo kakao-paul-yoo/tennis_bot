@@ -1,5 +1,6 @@
 """
 네이버 예약 테니스장 빈 슬롯 모니터링 (Railway 배포용)
+- 1~8번 코트 전체 모니터링
 - 환경변수로 민감 정보 관리
 - 5분마다 예약 가능 시간 체크
 - 텔레그램 알림 발송
@@ -8,22 +9,31 @@
 import requests
 import schedule
 import time
-import json
 import os
 from datetime import datetime, timedelta
 
 # ==========================================
-# 설정값 (환경변수에서 읽기)
+# 설정값
 # ==========================================
 
-BIZ_ID = os.environ.get("BIZ_ID", "217811")
-ITEM_ID = os.environ.get("ITEM_ID", "7409663")
+BIZ_ID = "217811"
 MONITOR_DAYS_AHEAD = int(os.environ.get("MONITOR_DAYS_AHEAD", "22"))
 CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL_MINUTES", "5"))
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-COOKIE = os.environ.get("NAVER_COOKIE", "")
+
+# 코트 목록 (코트명: bizItemId)
+COURTS = {
+    "1번코트(하드)": "7409663",
+    "2번코트(하드)": "7409667",
+    "3번코트(하드)": "7409675",
+    "4번코트(하드)": "7409682",
+    "5번코트(하드)": "7409701",
+    "6번코트(하드)": "7409707",
+    "7번코트(잔디)": "7409712",
+    "8번코트(잔디)": "7409714",
+}
 
 # ==========================================
 # GraphQL API
@@ -31,47 +41,19 @@ COOKIE = os.environ.get("NAVER_COOKIE", "")
 
 GRAPHQL_URL = "https://booking.naver.com/graphql"
 
-HEADERS = {
-    "Cookie": COOKIE,
-    "Content-Type": "application/json",
-    "User-Agent": (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
-    ),
-    "Referer": f"https://booking.naver.com/booking/10/bizes/{BIZ_ID}/items/{ITEM_ID}",
-    "Accept": "*/*",
-    "Accept-Language": "ko-KR,ko;q=0.9",
-    "Origin": "https://booking.naver.com",
-}
-
 GRAPHQL_QUERY = """
 query hourlySchedule($scheduleParams: ScheduleParams) {
   schedule(input: $scheduleParams) {
     bizItemSchedule {
       hourly {
         id
-        name
-        slotId
         unitStartDateTime
         unitStartTime
         unitBookingCount
         unitStock
-        bookingCount
-        stock
-        isBusinessDay
         isSaleDay
         isUnitSaleDay
         duration
-        minBookingCount
-        maxBookingCount
-        saleStartDateTime
-        saleEndDateTime
-        prices {
-          groupName
-          price
-          name
-          __typename
-        }
         __typename
       }
       __typename
@@ -82,14 +64,30 @@ query hourlySchedule($scheduleParams: ScheduleParams) {
 """
 
 
-def get_hourly_schedule(start_dt: str, end_dt: str) -> list:
+def get_headers(item_id: str) -> dict:
+    cookie = os.environ.get("NAVER_COOKIE", "")
+    return {
+        "Cookie": cookie,
+        "Content-Type": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+        ),
+        "Referer": f"https://booking.naver.com/booking/10/bizes/{BIZ_ID}/items/{item_id}",
+        "Accept": "*/*",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+        "Origin": "https://booking.naver.com",
+    }
+
+
+def get_hourly_schedule(item_id: str, start_dt: str, end_dt: str) -> list:
     payload = {
         "operationName": "hourlySchedule",
         "variables": {
             "scheduleParams": {
                 "businessTypeId": 10,
                 "businessId": BIZ_ID,
-                "bizItemId": ITEM_ID,
+                "bizItemId": item_id,
                 "startDateTime": start_dt,
                 "endDateTime": end_dt,
                 "fixedTime": True,
@@ -99,7 +97,9 @@ def get_hourly_schedule(start_dt: str, end_dt: str) -> list:
         "query": GRAPHQL_QUERY,
     }
     try:
-        res = requests.post(GRAPHQL_URL, headers=HEADERS, json=payload, timeout=10)
+        res = requests.post(
+            GRAPHQL_URL, headers=get_headers(item_id), json=payload, timeout=10
+        )
         res.raise_for_status()
         data = res.json()
         hourly = (
@@ -110,7 +110,7 @@ def get_hourly_schedule(start_dt: str, end_dt: str) -> list:
         )
         return hourly or []
     except Exception as e:
-        print(f"  [API 오류] {e}")
+        print(f"  [API 오류 - {item_id}] {e}")
         return []
 
 
@@ -118,16 +118,14 @@ def is_available(slot: dict) -> bool:
     unit_booking = slot.get("unitBookingCount")
     if unit_booking is None:
         return False
-    is_sale_day = slot.get("isSaleDay", False)
-    is_unit_sale_day = slot.get("isUnitSaleDay", False)
-    if not (is_sale_day and is_unit_sale_day):
+    if not slot.get("isSaleDay", False) or not slot.get("isUnitSaleDay", False):
         return False
     try:
         unit_start_time = slot.get("unitStartTime", "")
         hour = int(unit_start_time.split(" ")[1].split(":")[0])
+        # 영업시간 06:00~21:59, 10~12시 제외
         if not (6 <= hour <= 21):
             return False
-        # 10~12시 제외
         if 10 <= hour <= 12:
             return False
     except Exception:
@@ -165,36 +163,45 @@ notified_slots = set()
 
 
 def check_and_notify():
-    # 쿠키 갱신 (환경변수 재읽기)
-    HEADERS["Cookie"] = os.environ.get("NAVER_COOKIE", COOKIE)
-
     now = datetime.now()
     start_dt = now.strftime("%Y-%m-%dT00:00:00")
     end_dt = (now + timedelta(days=MONITOR_DAYS_AHEAD)).strftime("%Y-%m-%dT23:59:59")
 
-    print(f"\n[{now.strftime('%Y-%m-%d %H:%M:%S')}] 체크 중...")
+    print(f"\n[{now.strftime('%Y-%m-%d %H:%M:%S')}] 전체 코트 체크 중...")
 
-    slots = get_hourly_schedule(start_dt, end_dt)
+    all_new_slots = []  # (코트명, item_id, slot)
+    error_count = 0
 
-    if not slots:
-        print("  → 슬롯 데이터 없음 (쿠키 만료 가능성)")
-        send_telegram("⚠️ 테니스장 모니터링 오류: 슬롯 데이터 없음\n쿠키가 만료됐을 수 있어요!")
+    for court_name, item_id in COURTS.items():
+        slots = get_hourly_schedule(item_id, start_dt, end_dt)
+
+        if not slots:
+            error_count += 1
+            continue
+
+        for slot in slots:
+            if not is_available(slot):
+                continue
+            slot_key = f"{item_id}_{slot.get('unitStartDateTime', '')}_{slot.get('unitStartTime', '')}"
+            if slot_key in notified_slots:
+                continue
+            notified_slots.add(slot_key)
+            all_new_slots.append((court_name, item_id, slot))
+
+    # 전체 코트 오류 = 쿠키 만료
+    if error_count == len(COURTS):
+        print("  → 전체 코트 오류 (쿠키 만료 가능성)")
+        send_telegram(
+            "⚠️ 테니스장 모니터링 오류\n"
+            "쿠키가 만료됐을 수 있어요!\n"
+            "Railway Variables에서 NAVER_COOKIE를 갱신해주세요."
+        )
         return
 
-    new_available = []
-    for slot in slots:
-        if not is_available(slot):
-            continue
-        slot_key = f"{slot.get('unitStartDateTime', '')}_{slot.get('unitStartTime', '')}"
-        if slot_key in notified_slots:
-            continue
-        notified_slots.add(slot_key)
-        new_available.append(slot)
-
-    if new_available:
-        lines = [f"🎾 테니스장 예약 가능! ({len(new_available)}개 슬롯)\n"]
-        for s in new_available:
-            unit_start_time = s.get("unitStartTime", "")  # "2026-03-16 06:00:00"
+    if all_new_slots:
+        lines = [f"🎾 내곡 테니스장 예약 가능! ({len(all_new_slots)}개 슬롯)\n"]
+        for court_name, item_id, s in all_new_slots:
+            unit_start_time = s.get("unitStartTime", "")
             duration = s.get("duration", 0)
             try:
                 dt = datetime.strptime(unit_start_time, "%Y-%m-%d %H:%M:%S")
@@ -203,17 +210,16 @@ def check_and_notify():
                 time_str = dt.strftime(f"%m/%d({wd}) %H:%M")
             except Exception:
                 time_str = unit_start_time
-            lines.append(f"  📅 {time_str} ({duration}분)")
+            lines.append(f"  📅 {time_str} ({duration}분) | {court_name}")
 
         lines.append(
-            f"\n👉 https://booking.naver.com/booking/10/bizes/{BIZ_ID}/items/{ITEM_ID}"
+            f"\n👉 https://booking.naver.com/booking/10/bizes/{BIZ_ID}/items/"
         )
         message = "\n".join(lines)
         print(message)
         send_telegram(message)
     else:
-        available_count = sum(1 for s in slots if is_available(s))
-        print(f"  → 새 슬롯 없음 (전체 {len(slots)}개 | 현재 예약가능 {available_count}개)")
+        print(f"  → 새 슬롯 없음")
 
 
 # ==========================================
@@ -221,9 +227,9 @@ def check_and_notify():
 # ==========================================
 
 if __name__ == "__main__":
-    print("🎾 네이버 예약 테니스장 모니터링 시작")
-    print(f"  BIZ_ID: {BIZ_ID} | ITEM_ID: {ITEM_ID}")
-    print(f"  체크 주기: {CHECK_INTERVAL_MINUTES}분 | {MONITOR_DAYS_AHEAD}일 앞까지 모니터링\n")
+    print("🎾 내곡 테니스장 전체 코트 모니터링 시작")
+    print(f"  코트: {', '.join(COURTS.keys())}")
+    print(f"  체크 주기: {CHECK_INTERVAL_MINUTES}분 | {MONITOR_DAYS_AHEAD}일 앞까지\n")
 
     check_and_notify()
 
