@@ -127,6 +127,9 @@ def is_available(slot: dict) -> bool:
         hour = int(unit_start_time.split(" ")[1].split(":")[0])
         if not (6 <= hour <= 21):
             return False
+        # 10~12시 제외
+        if 10 <= hour <= 12:
+            return False
     except Exception:
         return False
     return unit_booking == 0
