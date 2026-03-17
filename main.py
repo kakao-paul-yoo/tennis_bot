@@ -220,9 +220,15 @@ def query_venue(venue_name: str, court_name: str = None, days: int = None) -> st
     if not venue:
         return f"❓ '{venue_name}' 테니스장을 찾을 수 없어요"
 
-    now = datetime.now()
-    start_dt = now.strftime("%Y-%m-%dT00:00:00")
-    end_dt = (now + timedelta(days=days or MONITOR_DAYS_AHEAD)).strftime("%Y-%m-%dT23:59:59")
+    now = datetime.now(KST).replace(tzinfo=None)
+    start_dt = now.strftime("%Y-%m-%dT%H:%M:%S")  # 현재 시각부터
+    
+    if days == 1:
+        # 오늘 자정까지만
+        end_dt = now.strftime("%Y-%m-%dT23:59:59")
+    else:
+        end_dt = (now + timedelta(days=MONITOR_DAYS_AHEAD)).strftime("%Y-%m-%dT23:59:59")
+    
     biz_id = venue["biz_id"]
     exclude_hours = venue.get("exclude_hours", [])
 
