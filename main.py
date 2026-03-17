@@ -140,6 +140,11 @@ def get_hourly_schedule(biz_id: str, item_id: str, start_dt: str, end_dt: str) -
         return []
 
 
+from datetime import datetime, timedelta, timezone
+
+# KST 타임존 정의
+KST = timezone(timedelta(hours=9))
+
 def is_available(slot: dict, exclude_hours: list = []) -> bool:
     unit_booking = slot.get("unitBookingCount")
     if unit_booking is None:
@@ -153,9 +158,10 @@ def is_available(slot: dict, exclude_hours: list = []) -> bool:
             return False
         if hour in exclude_hours:
             return False
-        # 현재 시간 이후 슬롯만 허용
+        # KST 현재 시간과 비교
         slot_dt = datetime.strptime(unit_start_time, "%Y-%m-%d %H:%M:%S")
-        if slot_dt <= datetime.now():
+        now_kst = datetime.now(KST).replace(tzinfo=None)
+        if slot_dt <= now_kst:
             return False
     except Exception:
         return False
