@@ -153,6 +153,10 @@ def is_available(slot: dict, exclude_hours: list = []) -> bool:
             return False
         if hour in exclude_hours:
             return False
+        # 현재 시간 이후 슬롯만 허용
+        slot_dt = datetime.strptime(unit_start_time, "%Y-%m-%d %H:%M:%S")
+        if slot_dt <= datetime.now():
+            return False
     except Exception:
         return False
     return unit_booking == 0
